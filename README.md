@@ -14,7 +14,7 @@ Here is doc with just [instructions to going from 0 to training really fast](sta
 
 # Setup
 
-1. Install `bigscience-workshop/Megatron-DeepSpeed`
+### 1.Install `bigscience-workshop/Megatron-DeepSpeed`
 ```
 git clone https://github.com/bigscience-workshop/Megatron-DeepSpeed
 cd Megatron-DeepSpeed
@@ -27,17 +27,35 @@ You can now use this repo directly by working directly from it. You don't need t
 pip install -e .
 ```
 
-2. Install `apex`
+#### 1.1 Install `cuda-toolkit`
+If we directly use `pip install -r requirements.txt`, it will install the latest version of `torch` with latest corresponding nvcc version requirement. If you don't have this version of cuda toolkit installed, you can reinstall the torch manually with corrected version of cuda toolkit. Or, you can install a new cuda toolkit under local environment.
 
+```
+micromamba/conda install -c "nvidia/label/cuda-12.4.0" cuda-toolkit
+```
+
+### 2. Install `apex`
+Install apex with micromamba/conda is so annoying, I spend about 4hr to figure it out. Always jump to one of these two errors:
+
+1. if we install apex using "pip install -v --disable-pip-version-check --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" ./"
+    - error: No module named 'torch'
+2. if we add "--no-build-isolation" to the command, although apex will be installed successfully, when we run the training script:
+    - error: No module named 'amp_C'
+
+So the final solution of installing apex is to directly download apex wheels from [apex_wheels](https://github.com/AlongWY/apex_wheels), thanks to AlongWY for providing this lifesaver.
+
+This modified version of Megatron-DeepSpeed is used with environment:
+**cuda-12.4, pytorch-2.4.1, numpy>=1.24**
+
+Below is the original instruction of apex installation:
 ```
 git clone https://github.com/NVIDIA/apex
 cd apex
 pip install --global-option="--cpp_ext" --global-option="--cuda_ext" --no-cache -v --disable-pip-version-check .  2>&1 | tee build.log
 ```
-
 (on JZ it's done in a special way, see [here](https://github.com/bigscience-workshop/bigscience/tree/master/jz/envs#apex).)
 
-3. Install `deepspeed`
+### 3. Install `deepspeed`
 
 ```
 git clone https://github.com/microsoft/deepspeed
@@ -51,7 +69,7 @@ adjust `TORCH_CUDA_ARCH_LIST="7.0"` to the architecture of your NVIDIA GPU (or j
 (on JZ it's done in a special way, see [here](https://github.com/bigscience-workshop/bigscience/tree/master/jz/envs#deepspeed).)
 
 
-3. CUDA kernels compilation
+### 4. CUDA kernels compilation
 
 The first time you run the training scripts several CUDA kernels will be compiled. Which means you need to have a cuda environment set up in your environment and it should match the version pytorch was built with.
 
