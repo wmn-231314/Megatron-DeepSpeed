@@ -166,6 +166,8 @@ def process_json_lines(json_lines, encoder, builders, writer):
 def get_args():
     parser = argparse.ArgumentParser()
     group = parser.add_argument_group(title='input data')
+    group.add_argument('--root',type=str, default='data/',
+                       help='Root directory of the data')
     group.add_argument('--input', type=str, required=True,
                        help='Path to input JSON')
     group.add_argument('--json-keys', nargs='+', default=['text'],
@@ -285,6 +287,10 @@ def get_output_filename(prefix, key, level, process_index = None):
 
 def main():
     args = get_args()
+    input_path = os.path.join(args.root, args.input)
+    if not os.path.exists(input_path):
+        print(f"Input file {input_path} does not exist.")
+        exit()
 
     print("Opening", args.input)
     simple_queue = multiprocessing.Queue(1_000) # we can also limit the number of elements to reduce the memory footprint.
@@ -303,7 +309,7 @@ def main():
     process_ids = list(range(len(writers)))
     processes = [multiprocessing.Process(target=process_samples, args=(simple_queue, process_id, args, level, writer)) for process_id, writer in zip(process_ids, writers)]
     log_thread = threading.Thread(target=log, args=(list(readers), args.log_interval))
-    fill_thread = multiprocessing.Process(target=fill_simple_queue, args=(args.input, simple_queue, chunk_size))
+    fill_thread = multiprocessing.Process(target=fill_simple_queue, args=(input_path, simple_queue, chunk_size))
 
     fill_thread.start()
     log_thread.start()
@@ -337,8 +343,9 @@ def main():
     builders = {}
     for key in args.json_keys:
         output_filename = f"{args.output_prefix}_{key}_{level}"
-        output_bin_files[key] = data_file_path(output_filename)
-        output_idx_files[key] = index_file_path(output_filename)
+        output_bin_files[key] = data_file_path(output_filename, root=args.root)
+        output_idx_files[key] = index_file_path(output_filename, root=args.root)
+        print(f"Output file: {output_bin_files[key]}", flush=True)
         best_dtype = best_fitting_dtype(args.padded_vocab_size) if args.dataset_impl == "mmap" else None
         builders[key] = indexed_dataset.make_builder(output_bin_files[key],
                                                      impl=args.dataset_impl,
