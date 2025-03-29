@@ -421,11 +421,16 @@ def setup_model_and_optimizer(model_provider_func):
         if args.universal_checkpoint:
             config["checkpoint"] = {"load_universal": True}
 
+        print("DeepSpeed config: ", config)
+        
         model, optimizer, _, lr_scheduler = deepspeed.initialize(
             model=model[0],
             optimizer=optimizer,
             lr_scheduler=lr_scheduler,
-            config=config,
+            # config=config, 
+            # TODO: check if this is needed, 
+            # input both args.deepspeed_config 
+            # and config will trigger assertion error
             args=args,
         )
 
@@ -1133,6 +1138,7 @@ def evaluate_and_print_results(prefix, forward_step_func,
 
 
 def cyclic_iter(iter):
+    print("Using cyclic iterator")
     while True:
         for x in iter:
             yield x
@@ -1240,13 +1246,13 @@ def build_train_valid_test_data_iterators(
     # Build iterators.
     dl_type = args.dataloader_type
     assert dl_type in ['single', 'cyclic']
-
+    
     if train_dataloader is not None:
         train_data_iterator = iter(train_dataloader) if dl_type in ['single'] \
                               else iter(cyclic_iter(train_dataloader))
     else:
         train_data_iterator = None
-
+        
     if valid_dataloaders is not None:
         valid_data_iterators = [iter(vdl) if dl_type in ['single'] \
                               else iter(cyclic_iter(valid_dataloaders))

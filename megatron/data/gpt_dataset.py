@@ -285,6 +285,7 @@ def _build_index_mappings(name, data_prefix, documents, sizes,
     """
     # Number of tokens in each epoch and number of required epochs.
     tokens_per_epoch = _num_tokens(documents, sizes)
+    print_rank_0(f"> Tokens per epoch {tokens_per_epoch}")
     num_epochs = _num_epochs(tokens_per_epoch, seq_length, num_samples)
     # rng state
     np_rng = np.random.RandomState(seed=seed)
@@ -304,7 +305,6 @@ def _build_index_mappings(name, data_prefix, documents, sizes,
         if (not os.path.isfile(doc_idx_filename)) or \
            (not os.path.isfile(sample_idx_filename)) or \
            (not os.path.isfile(shuffle_idx_filename)):
-
             print_rank_0(' > WARNING: could not find index map files, building '
                          'the indices on rank 0 ...')
 
@@ -320,13 +320,16 @@ def _build_index_mappings(name, data_prefix, documents, sizes,
 
             else:
                 # Get the number of samples for the last epoch
-                num_samples_from_epochs_minus_one = (
-                    (num_epochs - 1) * tokens_per_epoch - 1) // seq_length
+                # num_samples_from_epochs_minus_one = (
+                #     (num_epochs - 1) * tokens_per_epoch - 1) // seq_length
+                # num_samples_per_epoch = (tokens_per_epoch - 1) // seq_length
+                num_samples_per_epoch = (tokens_per_epoch + seq_length - 1) // seq_length  # ceiling
+                num_samples_from_epochs_minus_one = (num_epochs - 1) * num_samples_per_epoch
                 last_epoch_num_samples = num_samples - \
                                          num_samples_from_epochs_minus_one
                 assert last_epoch_num_samples >= 0, \
                     f'last epoch number of samples {last_epoch_num_samples} should be non-negative.'
-                num_samples_per_epoch = (tokens_per_epoch - 1) // seq_length
+
                 assert last_epoch_num_samples <= num_samples_per_epoch, \
                     f'last epoch number of samples {last_epoch_num_samples} exceeded max value {num_samples_per_epoch}.'
                 # If we have less than cutoff_last_epoch * samples_per_epoch of the samples for the last epoch,
@@ -425,7 +428,11 @@ def _num_epochs(tokens_per_epoch, seq_length, num_samples):
         # -1 is because we need to retrieve seq_length + 1 token each time
         # but the last token will overlap with the first token of the next
         # sample except for the last sample.
-        if ((total_tokens - 1) // seq_length) >= num_samples:
+        # if ((total_tokens - 1) // seq_length) >= num_samples:
+        if (total_tokens // seq_length) >= num_samples:
+            print_rank_0(f" > Total token {total_tokens}, seq_length {seq_length}, "
+                         f"num_samples {num_samples}, num_epochs {num_epochs}, "
+                         f"tokens_per_epoch {tokens_per_epoch}")
             return num_epochs
 
 

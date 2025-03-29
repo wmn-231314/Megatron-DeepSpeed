@@ -45,7 +45,7 @@ Install apex with micromamba/conda is so annoying, I spend about 4hr to figure i
 So the final solution of installing apex is to directly download apex wheels from [apex_wheels](https://github.com/AlongWY/apex_wheels), thanks to AlongWY for providing this lifesaver.
 
 This modified version of Megatron-DeepSpeed is used with environment:
-**cuda-12.4, pytorch-2.4.1, numpy>=1.24**
+**cuda-12.4, pytorch-2.4.1, numpy>=1.24, python=3.10**
 
 Below is the original instruction of apex installation:
 ```
