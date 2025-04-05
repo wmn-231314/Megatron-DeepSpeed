@@ -108,6 +108,18 @@ The loose json is then processed into a binary format for training. To convert t
 An example script to prepare data for GPT training is:
 
 ```
+python tools/preprocess_data_many_cores.py \
+    --input c4_test.json \
+    --output-prefix gpt2tok_c4_en_test \
+    --dataset-impl mmap \
+    --tokenizer-type PretrainedFromHF \
+    --tokenizer-name-or-path gpt2 \
+    --append-eod \
+    --workers 64 \
+    --root /path/to/data/root
+```
+
+```
 python tools/preprocess_data.py \
     --input my-corpus.json \
     --output-prefix my-gpt2 \
@@ -118,6 +130,7 @@ python tools/preprocess_data.py \
     --append-eod \
     --workers 8
 ```
+
 
 The output will be two files named, in this case, `my-gpt2_text_document.bin` and `my-gpt2_text_document.idx`. The `--data-path` specified in later GPT training is the full path and new filename, but without the file extension.
 
