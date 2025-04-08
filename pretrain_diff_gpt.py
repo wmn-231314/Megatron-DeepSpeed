@@ -24,7 +24,7 @@ from megatron import get_tokenizer
 from megatron import mpu
 from megatron.data.gpt_dataset import build_train_valid_test_datasets, build_dataset_group
 from megatron.enums import AttnMaskType
-from megatron.model import GPTModel, GPTModelPipe
+from megatron.model import TransEncoder, TransEncoderPipe
 from megatron.training import pretrain
 from megatron.utils import get_ltor_masks_and_position_ids, get_prefix_indices
 from megatron.utils import average_losses_across_data_parallel_group
@@ -32,6 +32,7 @@ from megatron.utils import average_losses_across_data_parallel_group
 import deepspeed
 from deepspeed.runtime.utils import see_memory_usage
 import os
+import math
 
 try:
     from torch.distributed.elastic.multiprocessing.errors import record
@@ -43,7 +44,7 @@ except ImportError:
 def model_provider(pre_process=True, post_process=True):
     """Build the model."""
 
-    print_rank_0('building GPT model ...')
+    print_rank_0('building Masked Diffusion Model ...')
     see_memory_usage(f"Before Building Model", force=True)
 
     args = get_args()
@@ -54,17 +55,16 @@ def model_provider(pre_process=True, post_process=True):
                              enabled=args.zero_stage == 3,
                              mpu=mpu):
         if args.deepspeed:
-            args.pretrain_causal_attention = True
-            model = GPTModelPipe(
+            model = TransEncoderPipe(
                 num_tokentypes=0,
                 parallel_output=True,
-                attn_mask_type=AttnMaskType.causal
+                attn_mask_type=AttnMaskType.prefix  # Changed to prefix for diffusion
             )
             # This is a hack to give us a reference to get_batch_pipe from within training.py
             # We need to call model.set_batch_fn after deepspeed.initialize
             model._megatron_batch_fn = get_batch_pipe
         else:
-            model = GPTModel(
+            model = TransEncoder(
                 num_tokentypes=0,
                 parallel_output=True,
                 pre_process=pre_process,
@@ -75,7 +75,7 @@ def model_provider(pre_process=True, post_process=True):
 
 
 def get_batch(data_iterator):
-    """Generate a batch"""
+    """Generate a batch for masked diffusion model"""
     args = get_args()
     tokenizer = get_tokenizer()
 
@@ -95,7 +95,7 @@ def get_batch(data_iterator):
     labels = tokens_[:, 1:].contiguous()
     tokens = tokens_[:, :-1].contiguous()
 
-    # Get the masks and postition ids.
+    # Get the masks and position ids.
     attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
         tokens,
         tokenizer.eod,
@@ -106,7 +106,22 @@ def get_batch(data_iterator):
         loss_on_targets_only=args.loss_on_targets_only
     )
 
-    return tokens, labels, loss_mask, attention_mask, position_ids
+    # Sample time step t
+    t = torch.rand((tokens.size(0),), device=tokens.device)
+    
+    # Compute noise schedule based on t
+    # Using cosine schedule as in the paper
+    noise_schedule = torch.cos(t * math.pi / 2)
+    noise_schedule = noise_schedule.unsqueeze(-1).expand_as(tokens)
+    
+    # Generate mask based on noise schedule
+    mask = torch.rand(tokens.shape, device=tokens.device) < noise_schedule
+    
+    # Apply masking for diffusion
+    masked_tokens = tokens.clone()
+    masked_tokens[mask] = tokenizer.vocab_size  # Use vocab_size as mask token
+    
+    return masked_tokens, labels, loss_mask, attention_mask, position_ids, mask, t
 
 
 def get_batch_pipe(data):
@@ -136,21 +151,48 @@ def get_batch_pipe(data):
         prefix_indices=None,
         loss_on_targets_only=args.loss_on_targets_only
     )
-    if args.curriculum_learning and args.curriculum_seqlen < tokens.size()[1]:
-        # seqlen-based curriculum learning
-        # tokens, position_ids, labels, loss_mask have size [batch size, seqlen]
-        tokens = tokens[:, :args.curriculum_seqlen].contiguous()
-        position_ids = position_ids[:, :args.curriculum_seqlen].contiguous()
-        labels = labels[:, :args.curriculum_seqlen].contiguous()
-        loss_mask = loss_mask[:, :args.curriculum_seqlen].contiguous()
 
-    return (tokens, position_ids, attention_mask), (labels, loss_mask)
+    # Sample time step t
+    t = torch.rand((tokens.size(0),), device=tokens.device)
+    
+    # Compute noise schedule based on t
+    # Using cosine schedule as in the paper
+    noise_schedule = torch.cos(t * math.pi / 2)
+    noise_schedule = noise_schedule.unsqueeze(-1).expand_as(tokens)
+    
+    # Generate mask based on noise schedule
+    mask = torch.rand(tokens.shape, device=tokens.device) < noise_schedule
+    
+    # Apply masking for diffusion
+    masked_tokens = tokens.clone()
+    masked_tokens[mask] = tokenizer.vocab_size  # Use vocab_size as mask token
+
+    return (masked_tokens, position_ids, attention_mask), (labels, loss_mask, mask, t)
 
 
-def loss_func(loss_mask, output_tensor):
-    losses = output_tensor.float()
-    loss_mask = loss_mask.view(-1).float()
-    loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()
+def loss_func(loss_mask, output_tensor, mask=None, t=None):
+    """Loss function for masked diffusion model"""
+    args = get_args()
+    
+    if mask is not None and t is not None:
+        # Compute loss weights based on time step
+        # Using cosine schedule as in the paper
+        loss_weights = torch.cos(t * math.pi / 2)
+        loss_weights = loss_weights.unsqueeze(-1).expand_as(output_tensor)
+        
+        # Only compute loss on masked positions
+        losses = output_tensor.float()
+        loss_mask = loss_mask.view(-1).float()
+        mask = mask.view(-1)
+        
+        # Apply mask and time step weights to loss
+        masked_losses = losses.view(-1) * loss_mask * mask.float() * loss_weights.view(-1)
+        loss = torch.sum(masked_losses) / (mask.sum() + 1e-8)
+    else:
+        # Original loss computation
+        losses = output_tensor.float()
+        loss_mask = loss_mask.view(-1).float()
+        loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()
 
     # Reduce loss for logging.
     averaged_loss = average_losses_across_data_parallel_group([loss])
@@ -165,7 +207,7 @@ def forward_step(data_iterator, model):
 
     # Get the batch.
     timers('batch-generator').start()
-    tokens, labels, loss_mask, attention_mask, position_ids = get_batch(
+    tokens, labels, loss_mask, attention_mask, position_ids, mask, t = get_batch(
         data_iterator)
     timers('batch-generator').stop()
 
@@ -173,8 +215,10 @@ def forward_step(data_iterator, model):
                           labels=labels)
     if args.curriculum_learning and args.curriculum_seqlen < args.seq_length:
         loss_mask = loss_mask[:, :args.curriculum_seqlen].contiguous()
+        if mask is not None:
+            mask = mask[:, :args.curriculum_seqlen].contiguous()
 
-    return output_tensor, partial(loss_func, loss_mask)
+    return output_tensor, partial(loss_func, loss_mask, mask=mask, t=t)
 
 
 def train_valid_test_datasets_provider(train_val_test_num_samples):
