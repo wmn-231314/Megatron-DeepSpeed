@@ -315,6 +315,9 @@ def parse_args(extra_args_provider=None, defaults={},
             import bitsandbytes as bnb
         except ModuleNotFoundError:
             raise ModuleNotFoundError("Please install bitsandbytes from https://github.com/facebookresearch/bitsandbytes.")
+        
+    if args.zero_stage > 1:
+        args.deepspeed = False # DeepSpeed is not supported for ZeRO-2 and ZeRO-3
 
     _print_args(args)
     return args

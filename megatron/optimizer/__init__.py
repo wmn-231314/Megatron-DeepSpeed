@@ -12,9 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-from apex.optimizers import FusedAdam as Adam
-from apex.optimizers import FusedSGD as SGD
+from deepspeed.accelerator import get_accelerator
+if get_accelerator().device_name() == 'cuda':
+    from apex.optimizers import FusedAdam as Adam
+    from apex.optimizers import FusedSGD as SGD
+else:
+    from torch.optim import Adam
+    from torch.optim import SGD
 
 from megatron import get_args
 from megatron.model.fused_layer_norm import MixedFusedLayerNorm as LayerNorm
@@ -68,25 +72,39 @@ def get_megatron_optimizer(model):
 
     # Base optimizer.
     param_groups = _get_params_for_weight_decay_optimization(model)
-    if args.optimizer == 'adam':
-        if args.use_bnb_optimizer:
-            import bitsandbytes as bnb
-            adam_optimizer = bnb.optim.Adam8bit
+    
+    if args.cpu_optimizer:
+        assert args.optimizer == 'adam', 'CPU offloading is for Adam'
+        if args.cpu_torch_adam:
+            cpu_adam_optimizer = torch.optim.AdamW
         else:
-            adam_optimizer = Adam
-        optimizer = adam_optimizer(param_groups,
-                                   lr=args.lr,
-                                   weight_decay=args.weight_decay,
-                                   betas=(args.adam_beta1, args.adam_beta2),
-                                   eps=args.adam_eps)
-    elif args.optimizer == 'sgd':
-        optimizer = SGD(param_groups,
-                        lr=args.lr,
-                        weight_decay=args.weight_decay,
-                        momentum=args.sgd_momentum)
+            from deepspeed.ops.adam import DeepSpeedCPUAdam
+            cpu_adam_optimizer = DeepSpeedCPUAdam
+        optimizer = cpu_adam_optimizer(param_groups,
+                                       lr=args.lr,
+                                       weight_decay=args.weight_decay,
+                                       betas=(args.adam_beta1, args.adam_beta2),
+                                       eps=args.adam_eps)
     else:
-        raise Exception('{} optimizer is not supported.'.format(
-            args.optimizer))
+        if args.optimizer == 'adam':
+            if args.use_bnb_optimizer:
+                import bitsandbytes as bnb
+                adam_optimizer = bnb.optim.Adam8bit
+            else:
+                adam_optimizer = Adam
+            optimizer = adam_optimizer(param_groups,
+                                    lr=args.lr,
+                                    weight_decay=args.weight_decay,
+                                    betas=(args.adam_beta1, args.adam_beta2),
+                                    eps=args.adam_eps)
+        elif args.optimizer == 'sgd':
+            optimizer = SGD(param_groups,
+                            lr=args.lr,
+                            weight_decay=args.weight_decay,
+                            momentum=args.sgd_momentum)
+        else:
+            raise Exception('{} optimizer is not supported.'.format(
+                args.optimizer))
 
     if args.deepspeed:
         return optimizer
