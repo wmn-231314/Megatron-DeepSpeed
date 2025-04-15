@@ -33,7 +33,8 @@ from megatron.model.fused_layer_norm import MixedFusedLayerNorm as LayerNorm
 from megatron.model.module import float16_to_fp32
 from .language_model import EmbeddingPipe
 from .transformer import ParallelTransformerLayerPipe
-
+import ipdb;
+st = ipdb.set_trace
 
 def post_language_model_processing(lm_output, labels, logit_weights,
                                    get_key_value, parallel_output,
@@ -122,7 +123,7 @@ class GPTModel(MegatronModule):
             attention_mask,
             layer_past=layer_past,
             get_key_value=get_key_value)
-
+        
         if self.post_process:
             return post_language_model_processing(
                 lm_output, labels,
@@ -166,7 +167,6 @@ def get_cross_entropy(is_prefix: bool):
         args = get_args()
 
         losses = mpu.vocab_parallel_cross_entropy(output.contiguous().float(), labels)
-
         if is_prefix:
             micro_batch_size, sequence_length = loss_mask.shape
             average_tokens_per_sample: torch.Tensor
@@ -191,6 +191,11 @@ def get_cross_entropy(is_prefix: bool):
 
         loss_mask = loss_mask.view(-1)
         loss = torch.sum(losses.view(-1) * loss_mask) / expected_number_of_tokens
+
+        # output the argmax of the output_logits
+        # output_logits_argmax = torch.argmax(output, dim=-1)
+        # print(f"output_logits_argmax: {output_logits_argmax[0][:10]}")
+        # print(f"labels: {labels[0][:10]}")
         return loss
     return CrossEntropy
 
@@ -231,18 +236,13 @@ class GPTModelPipe(PipelineModule,MegatronModule):
                                         num_tokentypes=num_tokentypes,
                                         tied_weight_attr='word_embeddings_weight'))
 
+        def undo(x):
+            return x.transpose(0, 1).contiguous()
+
         if args.fp32_residual_connection:
-            if getattr(args, 'pretrain_causal_attention', False):
-                self.specs.append(lambda x: x.transpose(0, 1).contiguous().float())
-            else:
-                # EmbeddingPipe returns attention mask as well
-                self.specs.append(lambda x: (x[0].transpose(0, 1).contiguous().float(), *x[1:]))
+            self.specs.append(lambda x: x.transpose(0, 1).contiguous().float())
         else:
-            if getattr(args, 'pretrain_causal_attention', False):
-                self.specs.append(lambda x: x.transpose(0, 1).contiguous())
-            else:
-                # EmbeddingPipe returns attention mask as well
-                self.specs.append(lambda x: (x[0].transpose(0, 1).contiguous(), *x[1:]))
+            self.specs.append(undo)
 
         for layer_idx in range(args.num_layers):
             self.specs.append(
@@ -255,10 +255,6 @@ class GPTModelPipe(PipelineModule,MegatronModule):
                     self_attn_mask_type=attn_mask_type))
 
         # Undo data format change
-        def undo(x):
-            if not getattr(args, 'pretrain_causal_attention', False):
-                x = x[0]
-            return x.transpose(0, 1).contiguous()
         self.specs.append(undo)
 
         # Final layernorm after transformer layers
@@ -311,7 +307,6 @@ class GPTModelPipe(PipelineModule,MegatronModule):
             partition_method = args.pp_partition_method
         else:
             partition_method = 'type:transformer'
-
         super().__init__(layers=self.specs,
                          loss_fn=get_cross_entropy(is_prefix=attn_mask_type is AttnMaskType.prefix),
                          topology=topo,

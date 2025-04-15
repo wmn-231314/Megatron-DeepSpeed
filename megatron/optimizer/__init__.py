@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from deepspeed.accelerator import get_accelerator
+import torch
 if get_accelerator().device_name() == 'cuda':
     from apex.optimizers import FusedAdam as Adam
     from apex.optimizers import FusedSGD as SGD
@@ -66,9 +67,6 @@ def _get_params_for_weight_decay_optimization(modules):
 
 def get_megatron_optimizer(model):
     args = get_args()
-
-    if args.cpu_optimizer:
-        raise NotImplementedError('need to add cpu adam')
 
     # Base optimizer.
     param_groups = _get_params_for_weight_decay_optimization(model)

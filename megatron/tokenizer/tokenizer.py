@@ -67,27 +67,27 @@ def build_tokenizer(args):
     return tokenizer
 
 
-def _vocab_size_with_padding(orig_vocab_size, args):
+def _vocab_size_with_padding(orig_vocab_size, tok_args):
     """Apply the requested rules to change the size of the vocabulary"""
-    if args.pad_vocab_size_to is not None:
-        if args.pad_vocab_size_to  < orig_vocab_size:
+    if tok_args.pad_vocab_size_to is not None:
+        if tok_args.pad_vocab_size_to  < orig_vocab_size:
             raise ValueError(
-                f"You asked to pad the vocabulary to {args.pad_vocab_size_to} when the initial vocabulary size is "
+                f"You asked to pad the vocabulary to {tok_args.pad_vocab_size_to} when the initial vocabulary size is "
                 f"{orig_vocab_size}. You can only pad to a higher value."
             )
 
-        if args.make_vocab_size_divisible_by is not None and (args.pad_vocab_size_to % args.make_vocab_size_divisible_by) != 0:
-            raise ValueError(f"{args.pad_vocab_size_to} is not divisible by {args.make_vocab_size_divisible_by}")
+        if tok_args.make_vocab_size_divisible_by is not None and (tok_args.pad_vocab_size_to % tok_args.make_vocab_size_divisible_by) != 0:
+            raise ValueError(f"{tok_args.pad_vocab_size_to} is not divisible by {tok_args.make_vocab_size_divisible_by}")
 
-        after = args.pad_vocab_size_to
+        after = tok_args.pad_vocab_size_to
     else:
         # Pad vocab size so it is divisible by model parallel size and still having GPU friendly size.
         after = orig_vocab_size
-        multiple = args.make_vocab_size_divisible_by * \
-            args.tensor_model_parallel_size
+        multiple = tok_args.make_vocab_size_divisible_by * \
+            tok_args.tensor_model_parallel_size
         while (after % multiple) != 0:
             after += 1
-    if args.rank == 0:
+    if tok_args.rank == 0:
         print(' > padded vocab (size: {}) with {} dummy tokens '
               '(new size: {})'.format(
                   orig_vocab_size, after - orig_vocab_size, after), flush=True)

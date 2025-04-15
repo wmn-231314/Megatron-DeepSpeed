@@ -57,7 +57,8 @@ from megatron.global_vars import codecarbon_tracker_start, codecarbon_tracker_st
 from megatron.data.dataset_utils import analyze_data_prefix
 
 import deepspeed
-
+import ipdb
+st = ipdb.set_trace
 
 def print_datetime(string):
     """Note that this call will sync across all ranks."""
@@ -129,7 +130,8 @@ def pretrain(train_valid_test_dataset_provider,
             args.curriculum_learning = args.deepspeed_configuration[ \
                 "curriculum_learning"]["enabled"]
         if args.curriculum_learning and \
-            args.pipeline_model_parallel_size >= 1:
+            args.pipeline_model_parallel_size >= 1 and \
+            not args.no_pipeline_parallel:
             from deepspeed.runtime.data_pipeline.curriculum_scheduler \
                 import CurriculumScheduler
             args.curriculum_scheduler = CurriculumScheduler( \
@@ -159,7 +161,7 @@ def pretrain(train_valid_test_dataset_provider,
     else:
         train_data_iterator, valid_data_iterator, test_data_iterator = build_train_valid_test_data_iterators(
                 train_valid_test_dataset_provider)
-
+        
     if args.data_path is not None and len(args.data_path) > 1:
         prefixes, weights = analyze_data_prefix(args.data_path)
         setattr(args, "data_prefixes", prefixes)
@@ -432,6 +434,7 @@ def setup_model_and_optimizer(model_provider_func):
             # input both args.deepspeed_config 
             # and config will trigger assertion error
             args=args,
+            mpu=mpu if args.no_pipeline_parallel else None
         )
 
         assert model.fp16_enabled() == args.fp16, "megatron fp16 config does not match deepspeed"
@@ -506,7 +509,7 @@ def train_step(forward_step_func, data_iterator,
     args = get_args()
     timers = get_timers()
 
-    if args.deepspeed:
+    if args.deepspeed and not args.no_pipeline_parallel:
         assert isinstance(model[0], deepspeed.PipelineEngine), model
         loss = model[0].train_batch(data_iter=data_iterator)
         skipped_iter = 0
@@ -585,6 +588,12 @@ def train_step(forward_step_func, data_iterator,
         skipped_iter = 0
         grad_norm = None
         num_zeros_in_grad = None
+
+        loss_reduced = {}
+        for key in losses_reduced[0]:
+            losses_reduced_for_key = [x[key] for x in losses_reduced]
+            loss_reduced[key] = sum(losses_reduced_for_key) / len(losses_reduced_for_key)
+        return loss_reduced, skipped_iter, grad_norm, num_zeros_in_grad
     else:
         if update_successful:
             increment = get_num_microbatches() * \
@@ -924,7 +933,8 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
             model[0].set_train_batch_size(global_batch_size)
 
         if args.curriculum_learning and \
-            args.pipeline_model_parallel_size >= 1:
+            args.pipeline_model_parallel_size >= 1 and \
+            not args.no_pipeline_parallel:
             args.curriculum_seqlen = args.curriculum_scheduler.update_difficulty( \
                     args.iteration + 1)
         loss_dict, skipped_iter, grad_norm, num_zeros_in_grad = \
@@ -1023,7 +1033,8 @@ def evaluate(forward_step_func, data_iterator, model, verbose=False):
         model_module.eval()
 
     if args.curriculum_learning and \
-        args.pipeline_model_parallel_size >= 1:
+        args.pipeline_model_parallel_size >= 1 and \
+        not args.no_pipeline_parallel:
         # When curriculum learning is used with pipeline parallelism, we need
         # this logic to ensure that the eval data is not truncated. If there
         # is a seqlen change due to that, we need to call
@@ -1051,7 +1062,7 @@ def evaluate(forward_step_func, data_iterator, model, verbose=False):
             else:
                 forward_backward_func = forward_backward_no_pipelining
 
-            if args.deepspeed:
+            if args.deepspeed and not args.no_pipeline_parallel:
                 # DeepSpeed uses eval_batch() and already aggregates losses.
                 assert isinstance(model, list) and len(model) == 1
                 loss = model[0].eval_batch(data_iterator)

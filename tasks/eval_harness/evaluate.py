@@ -200,21 +200,52 @@ class EvalHarnessAdaptor(GPT2LM):
         args = get_args()
 
         if args.deepspeed:
-            self.model.set_batch_fn(self.create_model_inputs)
-            # round up to multiple of micro_batch_size
-            new_size = ((len(inps) + args.micro_batch_size-1)  // args.micro_batch_size) * args.micro_batch_size
-            padded = F.pad(inps, (0, 0, 0, new_size-len(inps)), value = 0)
-            # dummy data iterator for pipelining.
-            data_iterator = list((torch.stack(inp) for inp in utils.chunks(padded, args.micro_batch_size)))
-            self.model.micro_batches = len(data_iterator)
-            
-            if self.adaptive_seq_len:
-                # Allow different shapes than the default seq_len to be communicated across pipes
-                # Without this Deepspeed will hang when trying to receive activations
-                self.model.reset_activation_shape()
-            
-            output = self.model.eval_batch(iter(data_iterator), compute_loss = False, reduce_output = None)
+            if args.no_pipeline_parallel:
+                # self.model.set_batch_fn(self.create_model_inputs)
+                # round up to multiple of micro_batch_size
+                new_size = ((len(inps) + args.micro_batch_size-1)  // args.micro_batch_size) * args.micro_batch_size
+                padded = F.pad(inps, (0, 0, 0, new_size-len(inps)), value = 0)
+                # dummy data iterator for pipelining.
+                data_iterator = list((torch.stack(inp) for inp in utils.chunks(padded, args.micro_batch_size)))
+                self.model.micro_batches = len(data_iterator)
+                # output = self.model.eval_batch(iter(data_iterator), compute_loss = False, reduce_output = None)
+                output = []
+                for tokens in data_iterator:
+                    attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
+                                                                tokens,
+                                                                self.EOT_TOKEN_ID,
+                                                                args.reset_position_ids,
+                                                                args.reset_attention_mask,
+                                                                args.eod_mask_loss)
+                    a_output, *other_losses = self.model(tokens,
+                        position_ids,
+                        attention_mask,
+                        tokentype_ids=None)
+                    output.append(a_output)
 
+                # if output is not None:
+                #     output = torch.cat(output, 0)[:len(inps)]
+                # else:
+                #     output = None
+
+                # # hack #2 for adaptive_seq_len to work as total_loss gets appended to and shapes aren't the same
+                # if args.adaptive_seq_len:
+                #     self.model.total_loss = None
+            else:
+                self.model.set_batch_fn(self.create_model_inputs)
+                # round up to multiple of micro_batch_size
+                new_size = ((len(inps) + args.micro_batch_size-1)  // args.micro_batch_size) * args.micro_batch_size
+                padded = F.pad(inps, (0, 0, 0, new_size-len(inps)), value = 0)
+                # dummy data iterator for pipelining.
+                data_iterator = list((torch.stack(inp) for inp in utils.chunks(padded, args.micro_batch_size)))
+                self.model.micro_batches = len(data_iterator)
+                
+                if self.adaptive_seq_len:
+                    # Allow different shapes than the default seq_len to be communicated across pipes
+                    # Without this Deepspeed will hang when trying to receive activations
+                    self.model.reset_activation_shape()
+                
+                output = self.model.eval_batch(iter(data_iterator), compute_loss = False, reduce_output = None)
 
             if output is not None:
                 output = torch.cat(output, 0)[:len(inps)]
@@ -224,6 +255,7 @@ class EvalHarnessAdaptor(GPT2LM):
             # hack #2 for adaptive_seq_len to work as total_loss gets appended to and shapes aren't the same
             if args.adaptive_seq_len:
                 self.model.total_loss = None
+
         else:
             # Since the shape of the micro-batch will change
             # We need set the correct shapes here
@@ -295,7 +327,8 @@ def load_ds_checkpoint_and_setup_megatron(args):
 
     ds_checkpoint = DeepSpeedCheckpoint(args.load,
                                         tp_degree=args.tensor_model_parallel_size,
-                                        pp_degree=args.pipeline_model_parallel_size)
+                                        pp_degree=args.pipeline_model_parallel_size,
+                                        no_pp=args.no_pipeline_parallel)
 
 
     cp_args = ds_checkpoint.get_args()

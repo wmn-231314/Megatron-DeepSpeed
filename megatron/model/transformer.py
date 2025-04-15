@@ -32,6 +32,8 @@ import deepspeed
 
 from .glu_activations import GLU_ACTIVATIONS
 from .positional_embeddings import RotaryEmbedding, apply_rotary_pos_emb_torch, apply_rotary_pos_emb
+import ipdb;
+st = ipdb.set_trace
 
 # flags required to enable jit fusion kernels
 torch._C._jit_set_profiling_mode(False)
@@ -212,7 +214,6 @@ class ParallelAttention(MegatronModule):
         # =====================
         # Query, Key, and Value
         # =====================
-
         if self.attention_type == AttnType.self_attn:
             # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
             mixed_x_layer, _ = self.query_key_value(hidden_states)
@@ -302,6 +303,7 @@ class ParallelAttention(MegatronModule):
             cos, sin = self.rotary_emb(value_layer, seq_len=seq_len)
             query_layer, key_layer = apply_rotary_fn(query_layer, key_layer, cos, sin, offset=offset)
 
+
         # Raw attention scores. [b * np, sq, sk]
         if alibi is None:
             matmul_result = torch.baddbmm(
@@ -324,9 +326,18 @@ class ParallelAttention(MegatronModule):
                 query_layer.transpose(0, 1),  # [b * np, sq, hn]
                 key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
                 beta=beta, alpha=(1.0 / self.norm_factor))
+        
+        # print(f"Norm factor: {self.norm_factor}")
+        # print("Q mean/std:", query_layer.mean().item(), query_layer.std().item())
+        # print("K mean/std:", key_layer.mean().item(), key_layer.std().item())
+
 
         # change view to [b, np, sq, sk]
         attention_scores = matmul_result.view(*output_size)
+
+        # print("attn_logits mean:", attention_scores.mean().item())
+        # print("attn_logits std:", attention_scores.std().item())
+
         # ==================================================
         # Update attention mask for inference. [b, np, sq, sk]
         # ==================================================
@@ -352,6 +363,9 @@ class ParallelAttention(MegatronModule):
         # attention scores and attention mask [b, np, sq, sk]
         attention_probs = self.scale_mask_softmax(attention_scores,
                                                   attention_mask)
+        
+        # print("attn_probs mean:", attention_probs.mean().item())
+        # print("attn_probs std:", attention_probs.std().item())
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.

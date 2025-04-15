@@ -316,8 +316,9 @@ def parse_args(extra_args_provider=None, defaults={},
         except ModuleNotFoundError:
             raise ModuleNotFoundError("Please install bitsandbytes from https://github.com/facebookresearch/bitsandbytes.")
         
-    if args.zero_stage > 1:
-        args.deepspeed = False # DeepSpeed is not supported for ZeRO-2 and ZeRO-3
+    # if args.zero_stage > 1:
+        # args.deepspeed = False # DeepSpeed is not supported for ZeRO-2 and ZeRO-3
+    args.deepspeed = False # for testing
 
     _print_args(args)
     return args
@@ -407,7 +408,8 @@ def _add_network_size_args(parser):
                        choices=megatron.model.glu_activations.GLU_ACTIVATIONS.keys(),
                        help='GLU activations to use.'
                        )
-
+    group.add_argument('--untie-embeddings-and-output-weights', action='store_true',
+                       help='Untie embeddings and output weights.'),
     group.add_argument('--kill-switch-path', type=str,
                        help='path to look for a kill switch, which if found will automatically exit the program'
                        )
@@ -453,6 +455,13 @@ def _add_logging_args(parser):
                        action='store_true',
                        help='If set, write validation perplexity to '
                        'tensorboard.')
+    # add wandb support
+    group.add_argument('--wandb-project', type=str, default='',
+                       help='The wandb project name. Ignore wandb by default.')
+    group.add_argument('--wandb-exp-name', type=str, default='',
+                       help='The wandb experiment name.')
+    group.add_argument('--wandb-save-dir', type=str, default='',
+                       help='Path to save the wandb results locally.')
 
     return parser
 
@@ -566,6 +575,10 @@ def _add_training_args(parser):
                        help='Run optimizer on CPU')
     group.add_argument('--cpu_torch_adam', action='store_true',
                        help='Use Torch Adam as optimizer on CPU.')
+    group.add_argument('--ds_fused_adam', action='store_true',
+                       help='Use DeepSpeed FusedAdam as optimizer.')
+    group.add_argument('--no-pipeline-parallel', action='store_true',
+                       help='Disable pipeline parallelism')
     group.add_argument('--codecarbon-dir', type=str, default=None,
                        help='Write CodeCarbon logs to this directory.')
     group.add_argument('--eval-only', type=bool, required=False,

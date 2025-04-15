@@ -33,6 +33,7 @@ _GLOBAL_ARGS = None
 _GLOBAL_NUM_MICROBATCHES_CALCULATOR = None
 _GLOBAL_TOKENIZER = None
 _GLOBAL_TENSORBOARD_WRITER = None
+_GLOBAL_WANDB_WRITER = None
 _GLOBAL_CODECARBON_TRACKER = None
 _GLOBAL_ADLR_AUTORESUME = None
 _GLOBAL_TIMERS = None
@@ -67,6 +68,11 @@ def get_tensorboard_writer():
     to check if it is initialized."""
     return _GLOBAL_TENSORBOARD_WRITER
 
+def get_wandb_writer():
+    """Return wandb writer. It can be None so no need
+    to check if it is initialized."""
+    return _GLOBAL_WANDB_WRITER
+
 def get_codecarbon_tracker():
     """Return codecarbon tracker. It can be None so no need
     to check if it is initialized."""
@@ -94,6 +100,7 @@ def set_global_variables(extra_args_provider=None, args_defaults={},
     if args.vocab_file or args.tokenizer_name_or_path:
         _ = _build_tokenizer(args)
     _set_tensorboard_writer(args)
+    _set_wandb_writer(args)
     _set_codecarbon_tracker(args)
     _set_adlr_autoresume(args)
     _set_timers()
@@ -157,6 +164,43 @@ def _set_tensorboard_writer(args):
             print('WARNING: TensorBoard writing requested but is not '
                   'available (are you using PyTorch 1.1.0 or later?), '
                   'no TensorBoard logs will be written.', flush=True)
+            
+def _set_wandb_writer(args):
+    """Set wandb writer."""
+    global _GLOBAL_WANDB_WRITER
+    _ensure_var_is_not_initialized(_GLOBAL_WANDB_WRITER,
+                                   'wandb writer')
+
+    if args.rank == (args.world_size - 1):
+        if getattr(args, 'wandb_project', '') == '' and \
+           getattr(args, 'wandb_exp_name', '') == '':
+            print('WARNING: WANDB writing requested but no legit wandb '
+                  'project or experiment name provided, '
+                  'therefore no WANDB logs will be written '
+                  'according to random generated project or experiment name.', flush=True)
+            return
+
+        try:
+            import wandb
+        except (ImportError, ModuleNotFoundError):
+            print('WARNING: WANDB writing requested but is not '
+                  'available (try to pip install wandb to solve it), '
+                  'no WANDB logs will be written.', flush=True)
+            return
+
+        if args.wandb_save_dir:
+            save_dir = args.wandb_save_dir
+        else:
+            # Defaults to the save dir.
+            save_dir = os.path.join(args.save, 'wandb')
+        wandb_kwargs = {
+            'dir': save_dir,
+            'name': args.wandb_exp_name,
+            'project': args.wandb_project,
+            'config': vars(args)}
+        os.makedirs(wandb_kwargs['dir'], exist_ok=True)
+        wandb.init(**wandb_kwargs)
+        _GLOBAL_WANDB_WRITER = wandb
 
 
 # Important: the codecarbon is very unstable and its latest incarnation using the python scheduler interferes with the asyncio library we use in the test suite which breaks everything, so making this a no-op for now.

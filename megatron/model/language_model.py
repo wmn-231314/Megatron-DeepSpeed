@@ -274,10 +274,6 @@ class EmbeddingPipe(Embedding):
 
         input_ids = inputs[0]
         position_ids = inputs[1]
-        if getattr(self._args, 'pretrain_causal_attention', False):
-            attention_mask = None
-        else:
-            attention_mask = inputs[2]
 
         if len(inputs) == 4:
             tokentype_ids = inputs[3]
@@ -286,12 +282,7 @@ class EmbeddingPipe(Embedding):
 
         embeddings = super().forward(input_ids, position_ids, tokentype_ids=tokentype_ids)
 
-        # If cmd args has attn_mask, we don't forward it as an activation.
-        if getattr(self._args, 'pretrain_causal_attention', False):
-            return embeddings
-        else:
-            return embeddings, attention_mask
-
+        return embeddings
 
     @property
     def word_embeddings_weight(self):
@@ -320,8 +311,9 @@ class TransformerLanguageModel(MegatronModule):
                  add_pooler=False,
                  pre_process=True,
                  post_process=True):
-        super(TransformerLanguageModel, self).__init__()
         args = get_args()
+        if args.untie_embeddings_and_output_weights: assert not add_decoder
+        super(TransformerLanguageModel, self).__init__(share_word_embeddings=not args.untie_embeddings_and_output_weights)
 
         self.pre_process = pre_process
         self.post_process = post_process
@@ -331,12 +323,13 @@ class TransformerLanguageModel(MegatronModule):
         self.encoder_attn_mask_type = encoder_attn_mask_type
         self.add_decoder = add_decoder
         self.decoder_attn_mask_type = decoder_attn_mask_type
+        self.untie_embeddings_and_output_weights = args.untie_embeddings_and_output_weights
         self.add_pooler = add_pooler
 
         # Embeddings.
         if self.pre_process:
             self.embedding = Embedding(self.hidden_size,
-                                       args.padded_vocab_size,
+                                       args.padded_vocab_size + 1 if self.untie_embeddings_and_output_weights else args.padded_vocab_size, # +1 for the extra diffusion mask token
                                        args.hidden_dropout,
                                        self.init_method,
                                        self.num_tokentypes)
@@ -368,6 +361,14 @@ class TransformerLanguageModel(MegatronModule):
             if self.add_pooler:
                 self.pooler = Pooler(self.hidden_size, self.init_method)
                 self._pooler_key = 'pooler'
+            
+            if self.untie_embeddings_and_output_weights:
+                self.output_layer = mpu.ColumnParallelLinear(
+                    args.hidden_size,
+                    args.padded_vocab_size,
+                    init_method=output_layer_init_method,
+                    bias=False) # Setting bias to False always to keep it consistent with embedding tying that also does not have a bias.
+                self._output_layer_key = 'output_layer'
 
     def set_input_tensor(self, input_tensor):
         """ See megatron.model.transformer.set_input_tensor()"""

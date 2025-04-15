@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from functools import lru_cache
-
+import math
 import torch
 import torch.nn as nn
 from megatron.enums import AttnMaskType
@@ -155,7 +155,6 @@ class FusedScaleMaskSoftmax(nn.Module):
     def forward(self, input, mask):
         # [b, np, sq, sk]
         assert input.dim() == 4
-
         if self.is_kernel_available(mask, *input.size()):
             return self.forward_fused_softmax(input, mask)
         else:
@@ -188,7 +187,6 @@ class FusedScaleMaskSoftmax(nn.Module):
 
         if self.attn_mask_type == AttnMaskType.causal:
             assert sq == sk, "causal mask is only for self attention"
-            # TODO: check if this is useful
             # assert mask is None, "Mask is silently ignored due to the use of a custom kernel"
 
             # input is 3D tensor (attn_batches, sq, sk)

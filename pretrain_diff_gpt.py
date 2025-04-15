@@ -24,7 +24,7 @@ from megatron import get_tokenizer
 from megatron import mpu
 from megatron.data.gpt_dataset import build_train_valid_test_datasets, build_dataset_group
 from megatron.enums import AttnMaskType
-from megatron.model import TransEncoder, TransEncoderPipe
+from megatron.model import DiffGPTModel, DiffGPTModelPipe
 from megatron.training import pretrain
 from megatron.utils import get_ltor_masks_and_position_ids, get_prefix_indices
 from megatron.utils import average_losses_across_data_parallel_group
@@ -32,19 +32,24 @@ from megatron.utils import average_losses_across_data_parallel_group
 import deepspeed
 from deepspeed.runtime.utils import see_memory_usage
 import os
-import math
-
+import ipdb;
+st = ipdb.set_trace
 try:
     from torch.distributed.elastic.multiprocessing.errors import record
 except ImportError:
     # noop
     def record(fn):
         return fn
+    
+data_debug=None
+debug_t=None
+debug_p_mask=None
+debug_masked_indices=None
 
 def model_provider(pre_process=True, post_process=True):
     """Build the model."""
 
-    print_rank_0('building Masked Diffusion Model ...')
+    print_rank_0('building GPT model ...')
     see_memory_usage(f"Before Building Model", force=True)
 
     args = get_args()
@@ -54,17 +59,16 @@ def model_provider(pre_process=True, post_process=True):
                              config_dict_or_path=args.deepspeed_config,
                              enabled=args.zero_stage == 3,
                              mpu=mpu):
-        if args.deepspeed:
-            model = TransEncoderPipe(
+        if args.deepspeed and not args.no_pipeline_parallel:
+            model = DiffGPTModelPipe(
                 num_tokentypes=0,
                 parallel_output=True,
-                attn_mask_type=AttnMaskType.prefix  # Changed to prefix for diffusion
             )
             # This is a hack to give us a reference to get_batch_pipe from within training.py
             # We need to call model.set_batch_fn after deepspeed.initialize
             model._megatron_batch_fn = get_batch_pipe
         else:
-            model = TransEncoder(
+            model = DiffGPTModel(
                 num_tokentypes=0,
                 parallel_output=True,
                 pre_process=pre_process,
@@ -74,8 +78,8 @@ def model_provider(pre_process=True, post_process=True):
     return model
 
 
-def get_batch(data_iterator):
-    """Generate a batch for masked diffusion model"""
+def get_batch(data_iterator, eps=1e-3):
+    """Generate a batch"""
     args = get_args()
     tokenizer = get_tokenizer()
 
@@ -90,42 +94,33 @@ def get_batch(data_iterator):
         data = None
     data_b = mpu.broadcast_data(keys, data, datatype)
 
-    # Unpack.
+    # Unpack: diff model's labels and token are the same
     tokens_ = data_b['text'].long()
-    labels = tokens_[:, 1:].contiguous()
     tokens = tokens_[:, :-1].contiguous()
 
-    # Get the masks and position ids.
-    attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
-        tokens,
-        tokenizer.eod,
-        args.reset_position_ids,
-        args.reset_attention_mask,
-        args.eod_mask_loss,
-        prefix_indices=None,
-        loss_on_targets_only=args.loss_on_targets_only
-    )
+    micro_batch_size, seq_length = tokens.size()
+    t = torch.rand(micro_batch_size, device=tokens.device)
+    
+    p_mask = (1 - eps) * t + eps
+    p_mask = p_mask[:, None].repeat(1, seq_length)
 
-    # Sample time step t
-    t = torch.rand((tokens.size(0),), device=tokens.device)
-    
-    # Compute noise schedule based on t
-    # Using cosine schedule as in the paper
-    noise_schedule = torch.cos(t * math.pi / 2)
-    noise_schedule = noise_schedule.unsqueeze(-1).expand_as(tokens)
-    
-    # Generate mask based on noise schedule
-    mask = torch.rand(tokens.shape, device=tokens.device) < noise_schedule
-    
-    # Apply masking for diffusion
-    masked_tokens = tokens.clone()
-    masked_tokens[mask] = tokenizer.vocab_size  # Use vocab_size as mask token
-    
-    return masked_tokens, labels, loss_mask, attention_mask, position_ids, mask, t
+    masked_indices = torch.rand((micro_batch_size, seq_length), device=tokens.device) < p_mask
+    noisy_input = torch.where(masked_indices, args.padded_vocab_size, tokens)
+
+    # create attention mask (no need so all zeros)
+    attention_mask = torch.ones(1, 1, seq_length, seq_length, device=tokens.device)
+    attention_mask = (attention_mask < 0.5)
+
+    # create position ids
+    position_ids = torch.arange(seq_length, device=tokens.device)
+    position_ids = position_ids[None, :].repeat(micro_batch_size, 1)
+
+    return noisy_input, tokens, attention_mask, position_ids, masked_indices, p_mask
 
 
-def get_batch_pipe(data):
+def get_batch_pipe(data, eps=1e-3):
     """Modification of `get_batch` to work on `next(data_iterator)` instead of `data_iterator`"""
+
     args = get_args()
     tokenizer = get_tokenizer()
 
@@ -138,87 +133,69 @@ def get_batch_pipe(data):
 
     # Unpack.
     tokens_ = data_b['text'].long()
-    labels = tokens_[:, 1:].contiguous()
-    tokens = tokens_[:, :-1].contiguous()
+    tokens = tokens_[:, :-1].contiguous() # remove last token
 
-    # Get the masks and position ids.
-    attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
-        tokens,
-        tokenizer.eod,
-        args.reset_position_ids,
-        args.reset_attention_mask,
-        args.eod_mask_loss,
-        prefix_indices=None,
-        loss_on_targets_only=args.loss_on_targets_only
-    )
+    micro_batch_size, seq_length = tokens.size()
+    t = torch.rand((micro_batch_size,), device=tokens.device)
+    p_mask = (1 - eps) * t + eps
+    p_mask = p_mask[:, None].repeat(1, seq_length)
 
-    # Sample time step t
-    t = torch.rand((tokens.size(0),), device=tokens.device)
+    masked_indices = torch.rand((micro_batch_size, seq_length), device=tokens.device) < p_mask
+    noisy_input = torch.where(masked_indices, tokenizer.vocab_size, tokens)
     
-    # Compute noise schedule based on t
-    # Using cosine schedule as in the paper
-    noise_schedule = torch.cos(t * math.pi / 2)
-    noise_schedule = noise_schedule.unsqueeze(-1).expand_as(tokens)
-    
-    # Generate mask based on noise schedule
-    mask = torch.rand(tokens.shape, device=tokens.device) < noise_schedule
-    
-    # Apply masking for diffusion
-    masked_tokens = tokens.clone()
-    masked_tokens[mask] = tokenizer.vocab_size  # Use vocab_size as mask token
+    # create attention mask (no need so all ones)
+    attention_mask = torch.ones(1, 1, seq_length, seq_length, device=tokens.device)
+    attention_mask = (attention_mask < 0.5)
 
-    return (masked_tokens, position_ids, attention_mask), (labels, loss_mask, mask, t)
+    # create position ids
+    position_ids = torch.arange(seq_length, device=tokens.device)
+    position_ids = position_ids[None, :].repeat(micro_batch_size, 1)
+
+    return (noisy_input, position_ids, attention_mask), (tokens, masked_indices, p_mask)
 
 
-def loss_func(loss_mask, output_tensor, mask=None, t=None):
-    """Loss function for masked diffusion model"""
-    args = get_args()
-    
-    if mask is not None and t is not None:
-        # Compute loss weights based on time step
-        # Using cosine schedule as in the paper
-        loss_weights = torch.cos(t * math.pi / 2)
-        loss_weights = loss_weights.unsqueeze(-1).expand_as(output_tensor)
-        
-        # Only compute loss on masked positions
-        losses = output_tensor.float()
-        loss_mask = loss_mask.view(-1).float()
-        mask = mask.view(-1)
-        
-        # Apply mask and time step weights to loss
-        masked_losses = losses.view(-1) * loss_mask * mask.float() * loss_weights.view(-1)
-        loss = torch.sum(masked_losses) / (mask.sum() + 1e-8)
-    else:
-        # Original loss computation
-        losses = output_tensor.float()
-        loss_mask = loss_mask.view(-1).float()
-        loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()
+def loss_func(tokens, masked_indices, p_mask, output_loss_tensor):
+    losses = output_loss_tensor.float()
+    losses_selected = losses[masked_indices] / p_mask[masked_indices]
+    loss = losses_selected.sum() / (tokens.shape[0] * tokens.shape[1])
+
+    # regulation loss
+    # reg_loss = losses[~masked_indices] / (1 - p_mask[~masked_indices])
+    # reg_loss = reg_loss.sum() / (tokens.shape[0] * tokens.shape[1])
+
+    # alpha = 0.5
+    # total_loss = alpha * loss + (1 - alpha) * reg_loss
 
     # Reduce loss for logging.
     averaged_loss = average_losses_across_data_parallel_group([loss])
-
     return loss, {'lm loss': averaged_loss[0]}
-
 
 def forward_step(data_iterator, model):
     """Forward step."""
-    args = get_args()
     timers = get_timers()
-
     # Get the batch.
     timers('batch-generator').start()
-    tokens, labels, loss_mask, attention_mask, position_ids, mask, t = get_batch(
+    noisy_input, tokens, attention_mask, position_ids, masked_indices, p_mask = get_batch(
         data_iterator)
     timers('batch-generator').stop()
 
-    output_tensor = model(tokens, position_ids, attention_mask,
-                          labels=labels)
-    if args.curriculum_learning and args.curriculum_seqlen < args.seq_length:
-        loss_mask = loss_mask[:, :args.curriculum_seqlen].contiguous()
-        if mask is not None:
-            mask = mask[:, :args.curriculum_seqlen].contiguous()
+    output_tensor = model(noisy_input, position_ids, attention_mask,
+                          labels=tokens)
+    loss, output = output_tensor
+    # check output using argmax
+    output_argmax = torch.argmax(output, dim=-1)
+    
+    # print(f"First 10 noisy input: {noisy_input[0][:10].detach().cpu().numpy()}")
+    # print(f"First 10 tokens: {tokens[0][:10].detach().cpu().numpy()}")
+    # print(f"First 10 output: {output_argmax[0][:10].detach().cpu().numpy()}")
+    # print(f"First 10 loss: {loss[0][:10].detach().cpu().numpy()}")
 
-    return output_tensor, partial(loss_func, loss_mask, mask=mask, t=t)
+    # print(f"Noisy input: {noisy_input[masked_indices][:10].detach().cpu().numpy()}")
+    # print(f"Tokens: {tokens[masked_indices][:10].detach().cpu().numpy()}")
+    # print(f"Output: {output_argmax[masked_indices][:10].detach().cpu().numpy()}")
+    # print(f"Loss: {loss[masked_indices][:10].detach().cpu().numpy()}")
+
+    return loss, partial(loss_func, output_argmax, masked_indices, p_mask)
 
 
 def train_valid_test_datasets_provider(train_val_test_num_samples):
